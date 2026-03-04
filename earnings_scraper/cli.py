@@ -22,7 +22,6 @@ from earnings_scraper.transcripts import TranscriptScraper
 from earnings_scraper.excel_output import export_to_excel
 from earnings_scraper.edgartools_scraper import EdgarToolsScraper
 
-
 def run_for_ticker(ticker, quarterly=False, include_transcripts=False,
                    output_dir=None, num_filings=1, use_xbrl=False,
                    use_edgartools=False, years=5):
@@ -90,14 +89,20 @@ def run_for_ticker(ticker, quarterly=False, include_transcripts=False,
         else:
             acc_numbers = [f["accessionNumber"] for f in filings_to_use]
             statements = scraper.scrape_multiple_filings(cik, acc_numbers)
+    data = client.get_financial_data(ticker)
+    company_name = data["company_name"]
+    cik = data["cik"]
+    print(f"      Company: {company_name} (CIK: {cik})")
 
-    total_items = 0
+    # Step 2: Parse into financial statements
+    period_type = "quarterly" if quarterly else "annual"
+    print(f"\n[2/3] Parsing {period_type} financial statements...")
+    statements = get_all_statements(data["facts"], quarterly=quarterly)
+
     for name, df in statements.items():
         n_items = len(df.index)
         n_periods = len(df.columns)
-        total_items += n_items
         print(f"      {name}: {n_items} line items x {n_periods} periods")
-    print(f"      Total line items across all statements: {total_items}")
 
     # Step 3: Export to Excel
     print(f"\n[3/3] Exporting to Excel...")
