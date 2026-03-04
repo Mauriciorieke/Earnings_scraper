@@ -139,3 +139,29 @@ class EdgarClient:
             "cik": cik,
             "facts": facts.get("facts", {}),
         }
+
+    def get_company_info(self, ticker):
+        """Get company name and CIK without fetching full XBRL facts.
+
+        Returns:
+            dict with 'company_name', 'cik'.
+        """
+        cik = self.get_cik(ticker)
+        submissions = self.get_submissions(cik)
+        return {
+            "company_name": submissions.get("name", ticker),
+            "cik": cik,
+        }
+
+    def get_latest_filing(self, ticker, form_type="10-K"):
+        """Get the single most recent filing of a given type.
+
+        Args:
+            ticker: Stock ticker symbol.
+            form_type: '10-K' or '10-Q'.
+
+        Returns:
+            Dict with filing metadata, or None if not found.
+        """
+        filings = self.get_recent_filings(ticker, [form_type])
+        return filings[0] if filings else None

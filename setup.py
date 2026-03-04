@@ -12,6 +12,7 @@ setup(
         "pandas>=2.1.0",
         "openpyxl>=3.1.0",
         "lxml>=4.9.0",
+        "edgartools>=5.0.0",
     ],
     entry_points={
         "console_scripts": [
