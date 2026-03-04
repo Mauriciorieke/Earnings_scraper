@@ -1,19 +1,20 @@
 """Excel output module for 3-statement financial models.
 
 Generates a formatted Excel workbook with separate tabs for:
-- Income Statement
-- Balance Sheet
-- Cash Flow Statement
+- Income Statement (all discovered line items)
+- Balance Sheet (all discovered line items)
+- Cash Flow Statement (all discovered line items)
 - Summary / Dashboard
 
-The output is designed so you can open it and immediately start
-building assumptions and forecasts on top of the historical data.
+Handles any number of line items — auto-detects totals and subtotals
+from the label text rather than relying on a hardcoded list.
 """
 
 import os
+import re
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 import sys
@@ -37,24 +38,45 @@ THIN_BORDER = Border(
 )
 NUMBER_FORMAT = '#,##0'
 EPS_FORMAT = '#,##0.00'
+PCT_FORMAT = '0.00%'
 
-# Line items that represent totals (bold + green highlight)
-TOTAL_ITEMS = {
-    "Gross Profit", "Operating Income", "Net Income", "Income Before Tax",
-    "Total Current Assets", "Total Assets", "Total Current Liabilities",
-    "Total Liabilities", "Total Stockholders Equity", "Total Liabilities & Equity",
-    "Cash from Operations", "Cash from Investing", "Cash from Financing",
-    "Net Change in Cash",
-}
+# Regex patterns for auto-detecting total / subtotal rows
+_TOTAL_PATTERN = re.compile(
+    r"(?i)^(?:total|net income|net loss|gross profit|operating income|"
+    r"stockholders.?equity|liabilities and|comprehensive income|"
+    r"cash.*(?:operations|investing|financing)|"
+    r"net (?:cash|change))",
+)
 
-# Line items that use per-share formatting
-EPS_ITEMS = {"EPS (Basic)", "EPS (Diluted)"}
+# Regex patterns for per-share items
+_PER_SHARE_PATTERN = re.compile(
+    r"(?i)(?:earnings per share|per share|EPS|\[USD/shares\])",
+)
+
+# Regex patterns for share count items
+_SHARES_PATTERN = re.compile(
+    r"(?i)(?:\[shares\]|shares outstanding|weighted average.*shares)",
+)
+
+
+def _is_total_row(label):
+    """Auto-detect whether a line item label is a total/subtotal."""
+    return bool(_TOTAL_PATTERN.search(label))
+
+
+def _get_number_format(label):
+    """Pick the right number format based on the line item label."""
+    if _PER_SHARE_PATTERN.search(label):
+        return EPS_FORMAT
+    if _SHARES_PATTERN.search(label):
+        return '#,##0'
+    return NUMBER_FORMAT
 
 
 def _style_sheet(ws, df, sheet_title):
     """Apply formatting to a worksheet containing a financial statement."""
     # Title row
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(df.columns) + 1)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=min(len(df.columns) + 1, 30))
     title_cell = ws.cell(row=1, column=1, value=sheet_title)
     title_cell.font = Font(name="Calibri", bold=True, size=14, color="2F5496")
     title_cell.alignment = Alignment(horizontal="left")
@@ -75,8 +97,8 @@ def _style_sheet(ws, df, sheet_title):
     for row_idx, (line_item, row_data) in enumerate(df.iterrows(), start=header_row + 1):
         label_cell = ws.cell(row=row_idx, column=1, value=line_item)
 
-        is_total = line_item in TOTAL_ITEMS
-        is_eps = line_item in EPS_ITEMS
+        is_total = _is_total_row(line_item)
+        num_fmt = _get_number_format(line_item)
 
         if is_total:
             label_cell.font = TOTAL_FONT
@@ -90,10 +112,7 @@ def _style_sheet(ws, df, sheet_title):
             cell = ws.cell(row=row_idx, column=col_idx)
             if pd.notna(val):
                 cell.value = val
-                if is_eps:
-                    cell.number_format = EPS_FORMAT
-                else:
-                    cell.number_format = NUMBER_FORMAT
+                cell.number_format = num_fmt
             else:
                 cell.value = ""
 
@@ -106,7 +125,9 @@ def _style_sheet(ws, df, sheet_title):
                 cell.font = DATA_FONT
 
     # Column widths
-    ws.column_dimensions["A"].width = 30
+    # Auto-size column A based on longest label
+    max_label_len = max((len(str(idx)) for idx in df.index), default=20)
+    ws.column_dimensions["A"].width = min(max_label_len + 4, 60)
     for col_idx in range(2, len(df.columns) + 2):
         ws.column_dimensions[get_column_letter(col_idx)].width = 16
 
@@ -115,65 +136,93 @@ def _style_sheet(ws, df, sheet_title):
 
 
 def _add_summary_sheet(wb, statements, company_name):
-    """Add a summary/dashboard sheet with key metrics from all statements."""
+    """Add a summary/dashboard sheet with key metrics pulled dynamically."""
     ws = wb.create_sheet("Summary", 0)
 
     # Title
-    ws.merge_cells("A1:F1")
+    ws.merge_cells("A1:G1")
     title_cell = ws.cell(row=1, column=1, value=f"{company_name} — Financial Summary")
     title_cell.font = Font(name="Calibri", bold=True, size=16, color="2F5496")
 
     ws.cell(row=3, column=1, value="Key Metrics (Most Recent Annual Periods)")
     ws.cell(row=3, column=1).font = Font(name="Calibri", bold=True, size=12)
 
-    key_metrics = [
-        ("Income Statement", ["Revenue", "Gross Profit", "Operating Income", "Net Income", "EPS (Diluted)"]),
-        ("Balance Sheet", ["Total Assets", "Total Liabilities", "Total Stockholders Equity", "Cash & Equivalents"]),
-        ("Cash Flow Statement", ["Cash from Operations", "Capital Expenditures", "Cash from Financing"]),
-    ]
+    # Key metric label patterns to pull from each statement
+    key_metric_patterns = {
+        "Income Statement": [
+            r"(?i)^revenue",
+            r"(?i)^gross profit",
+            r"(?i)^operating income",
+            r"(?i)^net income",
+            r"(?i)earnings per share.*diluted",
+            r"(?i)^research and development",
+            r"(?i)^selling.*general.*admin",
+        ],
+        "Balance Sheet": [
+            r"(?i)^cash",
+            r"(?i)^total.*current.*assets",
+            r"(?i)^assets$",
+            r"(?i)^total.*current.*liabilities",
+            r"(?i)^liabilities$",
+            r"(?i)^stockholders.*equity$",
+            r"(?i)^long.term.*debt",
+        ],
+        "Cash Flow Statement": [
+            r"(?i)net cash.*operating",
+            r"(?i)payments.*acquire.*property",
+            r"(?i)net cash.*investing",
+            r"(?i)net cash.*financing",
+            r"(?i)payments.*dividends",
+            r"(?i)payments.*repurchase.*common",
+        ],
+    }
 
     current_row = 5
-    for statement_name, metrics in key_metrics:
+    for statement_name, patterns in key_metric_patterns.items():
         ws.cell(row=current_row, column=1, value=statement_name)
         ws.cell(row=current_row, column=1).font = SUBHEADER_FONT
         ws.cell(row=current_row, column=1).fill = SUBHEADER_FILL
-        for c in range(2, 7):
+        for c in range(2, 8):
             ws.cell(row=current_row, column=c).fill = SUBHEADER_FILL
-        current_row += 1
 
         df = statements.get(statement_name)
         if df is None or df.empty:
+            current_row += 1
             ws.cell(row=current_row, column=1, value="(no data)")
             current_row += 2
             continue
 
         # Use last 5 periods
         recent_periods = list(df.columns[-5:])
-        for col_idx, period in enumerate(recent_periods, start=2):
-            cell = ws.cell(row=current_row - 1, column=col_idx + 1)
 
-        # Write period headers on the subheader row
+        # Write period headers
         for col_idx, period in enumerate(recent_periods, start=2):
-            ws.cell(row=current_row - 1, column=col_idx, value=str(period))
-            ws.cell(row=current_row - 1, column=col_idx).font = SUBHEADER_FONT
-            ws.cell(row=current_row - 1, column=col_idx).fill = SUBHEADER_FILL
-            ws.cell(row=current_row - 1, column=col_idx).alignment = Alignment(horizontal="center")
+            ws.cell(row=current_row, column=col_idx, value=str(period))
+            ws.cell(row=current_row, column=col_idx).font = SUBHEADER_FONT
+            ws.cell(row=current_row, column=col_idx).fill = SUBHEADER_FILL
+            ws.cell(row=current_row, column=col_idx).alignment = Alignment(horizontal="center")
 
-        for metric in metrics:
+        current_row += 1
+
+        # Find matching line items for each pattern
+        for pattern in patterns:
+            regex = re.compile(pattern)
+            matched = [idx for idx in df.index if regex.search(idx)]
+            if not matched:
+                continue
+            metric = matched[0]  # Take first match
             ws.cell(row=current_row, column=1, value=metric).font = DATA_FONT
-            if metric in df.index:
-                for col_idx, period in enumerate(recent_periods, start=2):
-                    val = df.at[metric, period]
-                    cell = ws.cell(row=current_row, column=col_idx)
-                    if pd.notna(val):
-                        cell.value = val
-                        if metric in EPS_ITEMS:
-                            cell.number_format = EPS_FORMAT
-                        else:
-                            cell.number_format = NUMBER_FORMAT
-                    cell.alignment = Alignment(horizontal="right")
-                    cell.font = DATA_FONT
+            num_fmt = _get_number_format(metric)
+            for col_idx, period in enumerate(recent_periods, start=2):
+                val = df.at[metric, period]
+                cell = ws.cell(row=current_row, column=col_idx)
+                if pd.notna(val):
+                    cell.value = val
+                    cell.number_format = num_fmt
+                cell.alignment = Alignment(horizontal="right")
+                cell.font = DATA_FONT
             current_row += 1
+
         current_row += 1  # blank row between sections
 
     # Forecast placeholder section
@@ -197,8 +246,8 @@ def _add_summary_sheet(wb, statements, company_name):
         ws.cell(row=current_row, column=1, value=label).font = DATA_FONT
         current_row += 1
 
-    ws.column_dimensions["A"].width = 30
-    for col_idx in range(2, 7):
+    ws.column_dimensions["A"].width = 45
+    for col_idx in range(2, 8):
         ws.column_dimensions[get_column_letter(col_idx)].width = 16
 
 

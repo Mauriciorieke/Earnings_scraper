@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, ".")
 from earnings_scraper.edgar import EdgarClient
-from earnings_scraper.financials import get_all_statements
+from earnings_scraper.financials import get_all_statements, discover_all_concepts
 from earnings_scraper.transcripts import TranscriptScraper
 from earnings_scraper.excel_output import export_to_excel
 
@@ -29,17 +29,23 @@ def run_for_ticker(ticker, quarterly=False, include_transcripts=False, output_di
     data = client.get_financial_data(ticker)
     company_name = data["company_name"]
     cik = data["cik"]
+    facts = data["facts"]
+    gaap_count = len(facts.get("us-gaap", {}))
     print(f"      Company: {company_name} (CIK: {cik})")
+    print(f"      Total XBRL concepts found: {gaap_count}")
 
-    # Step 2: Parse into financial statements
+    # Step 2: Parse into financial statements (universal discovery)
     period_type = "quarterly" if quarterly else "annual"
-    print(f"\n[2/3] Parsing {period_type} financial statements...")
-    statements = get_all_statements(data["facts"], quarterly=quarterly)
+    print(f"\n[2/3] Discovering & classifying ALL {period_type} line items...")
+    statements = get_all_statements(facts, quarterly=quarterly)
 
+    total_items = 0
     for name, df in statements.items():
         n_items = len(df.index)
         n_periods = len(df.columns)
+        total_items += n_items
         print(f"      {name}: {n_items} line items x {n_periods} periods")
+    print(f"      Total line items across all statements: {total_items}")
 
     # Step 3: Export to Excel
     print(f"\n[3/3] Exporting to Excel...")
